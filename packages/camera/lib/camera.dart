@@ -159,6 +159,8 @@ class CameraValue {
     this.isTakingPicture,
     this.isStreamingImages,
     bool isRecordingPaused,
+    this.isFlashlightOn,
+    this.barcodeContent,
   }) : _isRecordingPaused = isRecordingPaused;
 
   const CameraValue.uninitialized()
@@ -168,6 +170,7 @@ class CameraValue {
           isTakingPicture: false,
           isStreamingImages: false,
           isRecordingPaused: false,
+          isFlashlightOn: false,
         );
 
   /// True after [CameraController.initialize] has completed successfully.
@@ -194,12 +197,18 @@ class CameraValue {
   /// Is `null` until  [isInitialized] is `true`.
   final Size previewSize;
 
+  final bool isFlashlightOn;
+
+  final String barcodeContent;
+
   /// Convenience getter for `previewSize.height / previewSize.width`.
   ///
   /// Can only be called when [initialize] is done.
   double get aspectRatio => previewSize.height / previewSize.width;
 
   bool get hasError => errorDescription != null;
+
+  bool get hasBarcode => barcodeContent != null;
 
   CameraValue copyWith({
     bool isInitialized,
@@ -209,6 +218,8 @@ class CameraValue {
     String errorDescription,
     Size previewSize,
     bool isRecordingPaused,
+    bool isFlashlightOn,
+    String barcodeContent,
   }) {
     return CameraValue(
       isInitialized: isInitialized ?? this.isInitialized,
@@ -218,6 +229,8 @@ class CameraValue {
       isTakingPicture: isTakingPicture ?? this.isTakingPicture,
       isStreamingImages: isStreamingImages ?? this.isStreamingImages,
       isRecordingPaused: isRecordingPaused ?? _isRecordingPaused,
+      isFlashlightOn: isFlashlightOn ?? this.isFlashlightOn,
+      barcodeContent: barcodeContent,
     );
   }
 
@@ -229,7 +242,9 @@ class CameraValue {
         'isInitialized: $isInitialized, '
         'errorDescription: $errorDescription, '
         'previewSize: $previewSize, '
-        'isStreamingImages: $isStreamingImages)';
+        'isStreamingImages: $isStreamingImages,'
+        'isFlashlightOn: $isFlashlightOn,'
+        'barcodeContent: $barcodeContent)';
   }
 }
 
@@ -323,6 +338,9 @@ class CameraController extends ValueNotifier<CameraValue> {
     switch (map['eventType']) {
       case 'error':
         value = value.copyWith(errorDescription: event['errorDescription']);
+        break;
+      case 'barcode':
+        value = value.copyWith(barcodeContent: event['data']);
         break;
       case 'cameraClosing':
         value = value.copyWith(isRecordingVideo: false);
@@ -445,7 +463,7 @@ class CameraController extends ValueNotifier<CameraValue> {
       throw CameraException(e.code, e.message);
     }
 
-    await _imageStreamSubscription.cancel();
+    _imageStreamSubscription.cancel();
     _imageStreamSubscription = null;
   }
 
@@ -563,6 +581,80 @@ class CameraController extends ValueNotifier<CameraValue> {
       await _channel.invokeMethod<void>(
         'resumeVideoRecording',
         <String, dynamic>{'textureId': _textureId},
+      );
+    } on PlatformException catch (e) {
+      throw CameraException(e.code, e.message);
+    }
+  }
+
+  /// Start Flashlight
+  Future<void> flashlightOn() async {
+    if (!value.isInitialized || _isDisposed) {
+      throw CameraException(
+        'Uninitialized CameraController',
+        'flashlightOn was called on uninitialized CameraController',
+      );
+    }
+    if (value.isFlashlightOn) {
+      throw CameraException(
+        'Flashlight is already ON.',
+        'flashlightOn was called when a flashlight is already ON.',
+      );
+    }
+    try {
+      await _channel.invokeMethod<void>(
+        'flashlightOn',
+        <String, dynamic>{'textureId': _textureId},
+      );
+      value = value.copyWith(isFlashlightOn: true);
+    } on PlatformException catch (e) {
+      throw CameraException(e.code, e.message);
+    }
+  }
+
+  /// Stop flashlight.
+  Future<void> flashlightOff() async {
+    if (!value.isInitialized || _isDisposed) {
+      throw CameraException(
+        'Uninitialized CameraController',
+        'flashlightOff was called on uninitialized CameraController',
+      );
+    }
+    if (!value.isFlashlightOn) {
+      throw CameraException(
+        'Flashlight is already OFF.',
+        'flashlightOff was called when flashlight is OFF.',
+      );
+    }
+    try {
+      await _channel.invokeMethod<void>(
+        'flashlightOff',
+        <String, dynamic>{'textureId': _textureId},
+      );
+      value = value.copyWith(isFlashlightOn: false);
+    } on PlatformException catch (e) {
+      throw CameraException(e.code, e.message);
+    }
+  }
+
+  /// Set Rect Of Interest.
+  Future<void> setRectOfInterest(Rect rect) async {
+    if (!value.isInitialized || _isDisposed) {
+      throw CameraException(
+        'Uninitialized CameraController',
+        'setRectOfInterest was called on uninitialized CameraController',
+      );
+    }
+    try {
+      await _channel.invokeMethod<void>(
+        'setRectOfInterest',
+        <String, dynamic>{
+          'textureId': _textureId,
+          'left': rect.left,
+          'top': rect.top,
+          'right': rect.right,
+          'bottom': rect.bottom
+        },
       );
     } on PlatformException catch (e) {
       throw CameraException(e.code, e.message);

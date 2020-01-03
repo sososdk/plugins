@@ -1,12 +1,10 @@
 package io.flutter.plugins.camera;
 
-import static android.view.OrientationEventListener.ORIENTATION_UNKNOWN;
-import static io.flutter.plugins.camera.CameraUtils.computeBestPreviewSize;
-
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Context;
 import android.graphics.ImageFormat;
+import android.graphics.RectF;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
@@ -22,10 +20,20 @@ import android.media.Image;
 import android.media.ImageReader;
 import android.media.MediaRecorder;
 import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.util.Size;
 import android.view.OrientationEventListener;
 import android.view.Surface;
 import androidx.annotation.NonNull;
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.BinaryBitmap;
+import com.google.zxing.DecodeHintType;
+import com.google.zxing.MultiFormatReader;
+import com.google.zxing.NotFoundException;
+import com.google.zxing.PlanarYUVLuminanceSource;
+import com.google.zxing.ReaderException;
+import com.google.zxing.common.HybridBinarizer;
 import io.flutter.plugin.common.EventChannel;
 import io.flutter.plugin.common.MethodChannel.Result;
 import io.flutter.view.TextureRegistry.SurfaceTextureEntry;
@@ -35,9 +43,13 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import static android.view.OrientationEventListener.ORIENTATION_UNKNOWN;
+import static io.flutter.plugins.camera.CameraUtils.computeBestPreviewSize;
 
 public class Camera {
   private final SurfaceTextureEntry flutterTexture;
@@ -49,6 +61,12 @@ public class Camera {
   private final Size captureSize;
   private final Size previewSize;
   private final boolean enableAudio;
+  private HandlerThread backgroundThread;
+  private Handler backgroundHandler;
+  private HandlerThread barcodeThread;
+  private ImageReader barcodeImageReader;
+  private final MultiFormatReader barcodeReader;
+  private RectF rectOfInterest = new RectF(0, 0, 1, 1);
 
   private CameraDevice cameraDevice;
   private CameraCaptureSession cameraCaptureSession;
@@ -114,6 +132,11 @@ public class Camera {
         CameraUtils.getBestAvailableCamcorderProfileForResolutionPreset(cameraName, preset);
     captureSize = new Size(recordingProfile.videoFrameWidth, recordingProfile.videoFrameHeight);
     previewSize = computeBestPreviewSize(cameraName, preset);
+
+    barcodeReader = new MultiFormatReader();
+    Map<DecodeHintType, Object> hints = new EnumMap<>(DecodeHintType.class);
+    hints.put(DecodeHintType.POSSIBLE_FORMATS, Arrays.asList(BarcodeFormat.CODE_128, BarcodeFormat.QR_CODE));
+    barcodeReader.setHints(hints);
   }
 
   private void prepareMediaRecorder(String outputFilePath) throws IOException {
@@ -149,6 +172,30 @@ public class Camera {
     imageStreamReader =
         ImageReader.newInstance(
             previewSize.getWidth(), previewSize.getHeight(), ImageFormat.YUV_420_888, 2);
+
+    barcodeImageReader =
+        ImageReader.newInstance(
+            previewSize.getWidth(), previewSize.getHeight(), ImageFormat.YUV_420_888, 2);
+    backgroundThread = new HandlerThread("CAMERA");
+    backgroundThread.start();
+    backgroundHandler = new Handler(backgroundThread.getLooper());
+    barcodeThread = new HandlerThread("CAMERA-BARCODE");
+    barcodeThread.start();
+    barcodeImageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
+      Handler handler = new Handler(barcodeThread.getLooper());
+
+      @Override public void onImageAvailable(ImageReader reader) {
+        try (Image image = reader.acquireLatestImage()) {
+          ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+          byte[] data = new byte[buffer.remaining()];
+          buffer.get(data);
+          int width = image.getWidth();
+          int height = image.getHeight();
+          handler.removeCallbacksAndMessages(null);
+          handler.post(new BarcodeDecoder(data, width, height, rectOfInterest));
+        } catch (Throwable ignored) {}
+      }
+    }, backgroundHandler);
 
     cameraManager.openCamera(
         cameraName,
@@ -320,6 +367,8 @@ public class Camera {
               cameraCaptureSession = session;
               captureRequestBuilder.set(
                   CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
+              captureRequestBuilder.set(
+                  CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_STATE_ACTIVE_SCAN);
               cameraCaptureSession.setRepeatingRequest(captureRequestBuilder.build(), null, null);
               if (onSuccessCallback != null) {
                 onSuccessCallback.run();
@@ -340,6 +389,7 @@ public class Camera {
     List<Surface> surfaceList = new ArrayList<>();
     surfaceList.add(flutterSurface);
     surfaceList.addAll(remainingSurfaces);
+    surfaceList.add(pictureImageReader.getSurface());
     // Start the session
     cameraDevice.createCaptureSession(surfaceList, callback, null);
   }
@@ -420,8 +470,41 @@ public class Camera {
     result.success(null);
   }
 
+  public void flashlightOn(@NonNull final Result result) {
+    if (cameraDevice == null) {
+      result.error("configureFailed", "Camera was closed during configuration.", null);
+      return;
+    }
+    try {
+      captureRequestBuilder.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_TORCH);
+      cameraCaptureSession.setRepeatingRequest(captureRequestBuilder.build(), null, null);
+      result.success(null);
+    } catch (CameraAccessException e) {
+      result.error("CameraAccess", e.getMessage(), null);
+    }
+  }
+
+  public void flashlightOff(@NonNull final Result result) {
+    if (cameraDevice == null) {
+      result.error("configureFailed", "Camera was closed during configuration.", null);
+      return;
+    }
+    try {
+      captureRequestBuilder.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF);
+      cameraCaptureSession.setRepeatingRequest(captureRequestBuilder.build(), null, null);
+      result.success(null);
+    } catch (CameraAccessException e) {
+      result.error("CameraAccess", e.getMessage(), null);
+    }
+  }
+
+  public void setRectOfInterest(final RectF rect, @NonNull final Result result) {
+    rectOfInterest = rect;
+    result.success(null);
+  }
+
   public void startPreview() throws CameraAccessException {
-    createCaptureSession(CameraDevice.TEMPLATE_PREVIEW, pictureImageReader.getSurface());
+    createCaptureSession(CameraDevice.TEMPLATE_RECORD, barcodeImageReader.getSurface());
   }
 
   public void startPreviewWithImageStream(EventChannel imageStreamChannel)
@@ -502,6 +585,18 @@ public class Camera {
       mediaRecorder.release();
       mediaRecorder = null;
     }
+    if (barcodeImageReader != null) {
+      barcodeImageReader.close();
+      barcodeImageReader = null;
+    }
+    if (barcodeThread != null) {
+      barcodeThread.quit();
+      barcodeThread = null;
+    }
+    if (backgroundThread != null) {
+      backgroundThread.quit();
+      backgroundThread = null;
+    }
   }
 
   public void dispose() {
@@ -516,5 +611,48 @@ public class Camera {
             ? 0
             : (isFrontFacing) ? -currentOrientation : currentOrientation;
     return (sensorOrientationOffset + sensorOrientation + 360) % 360;
+  }
+
+  private class BarcodeDecoder implements Runnable {
+    private final RectF rectOfInterest;
+    private final byte[] data;
+    private final int width;
+    private final int height;
+
+    BarcodeDecoder(byte[] data, int width, int height, RectF rectOfInterest) {
+      this.data = data;
+      this.width = width;
+      this.height = height;
+      this.rectOfInterest = rectOfInterest;
+    }
+
+    @Override public void run() {
+      try {
+        RectF rect = new RectF(rectOfInterest.top, 1 - rectOfInterest.right, rectOfInterest.bottom, 1 - rectOfInterest.left);
+        com.google.zxing.Result result = decode(data, width, height, rect);
+        dartMessenger.sendBarcodeEvent(result.getText());
+      } catch (ReaderException e) {
+        barcodeReader.reset();
+        try {
+          byte[] temp = new byte[data.length];
+          for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+              temp[x * height + height - y - 1] = data[x + y * width];
+            }
+          }
+          com.google.zxing.Result result = decode(temp, height, width, rectOfInterest);
+          dartMessenger.sendBarcodeEvent(result.getText());
+        } catch (ReaderException ignored) {}
+      } finally {
+        barcodeReader.reset();
+      }
+    }
+
+    private com.google.zxing.Result decode(byte[] data, int width, int height, RectF rect) throws NotFoundException {
+      PlanarYUVLuminanceSource source = new PlanarYUVLuminanceSource(data, width, height, (int) (width * rect.left),
+          (int) (height * rect.top), (int) (width * rect.width()), (int) (height * rect.height()), false);
+      BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
+      return barcodeReader.decode(bitmap);
+    }
   }
 }
