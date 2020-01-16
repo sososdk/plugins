@@ -32,6 +32,7 @@ import com.google.zxing.DecodeHintType;
 import com.google.zxing.MultiFormatReader;
 import com.google.zxing.NotFoundException;
 import com.google.zxing.PlanarYUVLuminanceSource;
+import com.google.zxing.RGBLuminanceSource;
 import com.google.zxing.ReaderException;
 import com.google.zxing.common.HybridBinarizer;
 import io.flutter.plugin.common.EventChannel;
@@ -368,7 +369,7 @@ public class Camera {
               captureRequestBuilder.set(
                   CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
               captureRequestBuilder.set(
-                  CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_STATE_ACTIVE_SCAN);
+                  CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO);
               cameraCaptureSession.setRepeatingRequest(captureRequestBuilder.build(), null, null);
               if (onSuccessCallback != null) {
                 onSuccessCallback.run();
@@ -651,7 +652,16 @@ public class Camera {
     private com.google.zxing.Result decode(byte[] data, int width, int height, RectF rect) throws NotFoundException {
       PlanarYUVLuminanceSource source = new PlanarYUVLuminanceSource(data, width, height, (int) (width * rect.left),
           (int) (height * rect.top), (int) (width * rect.width()), (int) (height * rect.height()), false);
-      BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
+
+      int[] pixels = source.renderThumbnail();
+      int thumbnailWidth = source.getThumbnailWidth();
+      int thumbnailHeight = source.getThumbnailHeight();
+
+//      Bitmap temp = Bitmap.createBitmap(pixels, 0, thumbnailWidth, thumbnailWidth, thumbnailHeight, Bitmap.Config.ARGB_8888);
+//      temp.recycle();
+
+      RGBLuminanceSource rgbSource = new RGBLuminanceSource(thumbnailWidth, thumbnailHeight, pixels);
+      BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(rgbSource));
       return barcodeReader.decode(bitmap);
     }
   }
